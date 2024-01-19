@@ -18,22 +18,40 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "string.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>  // Include the stdlib.h header for atof
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
+// Define a structure to store GNRMC data
+typedef struct {
+    char time_str[12];
+    double latitude;
+    char lat_direction;
+    double longitude;
+    char lon_direction;
+    double speed;
+    char status;
+    int date;  // Change date to integer
+    char *mode;
+    char *checksum;
+} GNRMCData;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+// Buffer to store received data
+#define RX_BUFFER_SIZE 289
+uint8_t rxBuffer[RX_BUFFER_SIZE];
+uint8_t copyBuffer[RX_BUFFER_SIZE];  // New buffer to store copied data
+volatile uint16_t rxDataSize = 0;    // Keep track of valid data size
 /* USER CODE END PD */
+
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
@@ -41,43 +59,27 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-#if defined ( __ICCARM__ ) /*!< IAR Compiler */
-#pragma location=0x30000000
-ETH_DMADescTypeDef  DMARxDscrTab[ETH_RX_DESC_CNT]; /* Ethernet Rx DMA Descriptors */
-#pragma location=0x30000200
-ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptors */
-
-#elif defined ( __CC_ARM )  /* MDK ARM Compiler */
-
-__attribute__((at(0x30000000))) ETH_DMADescTypeDef  DMARxDscrTab[ETH_RX_DESC_CNT]; /* Ethernet Rx DMA Descriptors */
-__attribute__((at(0x30000200))) ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptors */
-
-#elif defined ( __GNUC__ ) /* GNU Compiler */
-ETH_DMADescTypeDef DMARxDscrTab[ETH_RX_DESC_CNT] __attribute__((section(".RxDecripSection"))); /* Ethernet Rx DMA Descriptors */
-ETH_DMADescTypeDef DMATxDscrTab[ETH_TX_DESC_CNT] __attribute__((section(".TxDecripSection")));   /* Ethernet Tx DMA Descriptors */
-
-#endif
-
-ETH_TxPacketConfig TxConfig;
-
-ETH_HandleTypeDef heth;
 
 UART_HandleTypeDef huart7;
 UART_HandleTypeDef huart3;
+DMA_HandleTypeDef hdma_uart7_rx;
 
 /* USER CODE BEGIN PV */
+
 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_ETH_Init(void);
+static void MX_DMA_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_USB_OTG_HS_USB_Init(void);
 static void MX_UART7_Init(void);
 /* USER CODE BEGIN PFP */
-
+void processNMEASentences(uint8_t *buffer, uint16_t size);
+void parseGNRMC(const char *sentence, GNRMCData *gnrmcData);
+void printGNRMCData(const GNRMCData *gnrmcData);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -113,24 +115,45 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_ETH_Init();
+  MX_DMA_Init();
   MX_USART3_UART_Init();
   MX_USB_OTG_HS_USB_Init();
   MX_UART7_Init();
   /* USER CODE BEGIN 2 */
-/*  uint8_t Tx[]="AT+COPS?\r\n";
-  HAL_UART_Transmit(&huart7, (uint8_t *)Tx, sizeof(Tx), HAL_MAX_DELAY);
-  HAL_UART_Receive(&huart7, (uint8_t *)rxBuffer, sizeof(rxBuffer), 2000); // Always check the timeout of receive buffer otherwise it will stuck in infinite loop
-  HAL_UART_Transmit(&huart3, (uint8_t *)rxBuffer, sizeof(rxBuffer), HAL_MAX_DELAY);*/
+	// Clear the contents of copyBuffer and rxBuffer
+	memset(copyBuffer, 0, RX_BUFFER_SIZE);
+	memset(rxBuffer, 0, RX_BUFFER_SIZE);
+
+  // Start DMA reception for UART7
+
+  HAL_UART_Receive_DMA(&huart7, rxBuffer, RX_BUFFER_SIZE);
   /* USER CODE END 2 */
-
-  read_operator();
-
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+
+
+	   // Copy the received data to the new buffer
+	    HAL_DMA_Abort(&hdma_uart7_rx);
+	    HAL_Delay(100);
+	    memcpy(copyBuffer, rxBuffer,RX_BUFFER_SIZE );
+	    processNMEASentences(copyBuffer, RX_BUFFER_SIZE);
+
+/*	    HAL_UART_Transmit(&huart3, (uint8_t *)copyBuffer, sizeof(copyBuffer), HAL_MAX_DELAY);*/
+
+		HAL_UART_Transmit(&huart3, (uint8_t *)"\r\n", 2, HAL_MAX_DELAY);
+		memset(copyBuffer, 0, RX_BUFFER_SIZE);
+		memset(rxBuffer, 0, RX_BUFFER_SIZE);
+
+
+	    HAL_UART_Receive_DMA(&huart7, rxBuffer, RX_BUFFER_SIZE);  // Restart DMA reception
+
+
+	    HAL_Delay(1000);
+
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -195,55 +218,6 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-}
-
-/**
-  * @brief ETH Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_ETH_Init(void)
-{
-
-  /* USER CODE BEGIN ETH_Init 0 */
-
-  /* USER CODE END ETH_Init 0 */
-
-   static uint8_t MACAddr[6];
-
-  /* USER CODE BEGIN ETH_Init 1 */
-
-  /* USER CODE END ETH_Init 1 */
-  heth.Instance = ETH;
-  MACAddr[0] = 0x00;
-  MACAddr[1] = 0x80;
-  MACAddr[2] = 0xE1;
-  MACAddr[3] = 0x00;
-  MACAddr[4] = 0x00;
-  MACAddr[5] = 0x00;
-  heth.Init.MACAddr = &MACAddr[0];
-  heth.Init.MediaInterface = HAL_ETH_RMII_MODE;
-  heth.Init.TxDesc = DMATxDscrTab;
-  heth.Init.RxDesc = DMARxDscrTab;
-  heth.Init.RxBuffLen = 1524;
-
-  /* USER CODE BEGIN MACADDRESS */
-
-  /* USER CODE END MACADDRESS */
-
-  if (HAL_ETH_Init(&heth) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  memset(&TxConfig, 0 , sizeof(ETH_TxPacketConfig));
-  TxConfig.Attributes = ETH_TX_PACKETS_FEATURES_CSUM | ETH_TX_PACKETS_FEATURES_CRCPAD;
-  TxConfig.ChecksumCtrl = ETH_CHECKSUM_IPHDR_PAYLOAD_INSERT_PHDR_CALC;
-  TxConfig.CRCPadCtrl = ETH_CRC_PAD_INSERT;
-  /* USER CODE BEGIN ETH_Init 2 */
-
-  /* USER CODE END ETH_Init 2 */
-
 }
 
 /**
@@ -364,6 +338,22 @@ static void MX_USB_OTG_HS_USB_Init(void)
 }
 
 /**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Stream0_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -399,12 +389,36 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
 
+  /*Configure GPIO pins : RMII_MDC_Pin RMII_RXD0_Pin RMII_RXD1_Pin */
+  GPIO_InitStruct.Pin = RMII_MDC_Pin|RMII_RXD0_Pin|RMII_RXD1_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF11_ETH;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : RMII_REF_CLK_Pin RMII_MDIO_Pin RMII_CRS_DV_Pin */
+  GPIO_InitStruct.Pin = RMII_REF_CLK_Pin|RMII_MDIO_Pin|RMII_CRS_DV_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF11_ETH;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
   /*Configure GPIO pins : LED_GREEN_Pin LED_RED_Pin */
   GPIO_InitStruct.Pin = LED_GREEN_Pin|LED_RED_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : RMII_TXD1_Pin */
+  GPIO_InitStruct.Pin = RMII_TXD1_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF11_ETH;
+  HAL_GPIO_Init(RMII_TXD1_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : USB_FS_PWR_EN_Pin */
   GPIO_InitStruct.Pin = USB_FS_PWR_EN_Pin;
@@ -433,6 +447,14 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Alternate = GPIO_AF10_OTG1_HS;
   HAL_GPIO_Init(USB_FS_ID_GPIO_Port, &GPIO_InitStruct);
 
+  /*Configure GPIO pins : RMII_TX_EN_Pin RMII_TXD0_Pin */
+  GPIO_InitStruct.Pin = RMII_TX_EN_Pin|RMII_TXD0_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF11_ETH;
+  HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
+
   /*Configure GPIO pin : LED_YELLOW_Pin */
   GPIO_InitStruct.Pin = LED_YELLOW_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
@@ -445,6 +467,105 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+void processNMEASentences(uint8_t *buffer, uint16_t size) {
+    char sentence[RX_BUFFER_SIZE];
+    int sentenceIndex = 0;
+
+    for (int i = 0; i < size; i++) {
+        if (buffer[i] == '\n' || buffer[i] == '\r') {
+            if (sentenceIndex > 0) {
+                sentence[sentenceIndex] = '\0';
+                if (strncmp(sentence, "$GNRMC,", 7) == 0) {
+                    GNRMCData gnrmcData;
+                    parseGNRMC(sentence, &gnrmcData);
+                    printGNRMCData(&gnrmcData);
+                }
+                memset(sentence, 0, sizeof(sentence));
+                sentenceIndex = 0;
+            }
+        } else if (sentenceIndex < RX_BUFFER_SIZE - 1) {
+            sentence[sentenceIndex++] = buffer[i];
+        }
+    }
+}
+
+void parseGNRMC(const char *sentence, GNRMCData *gnrmcData) {
+    char sentenceCopy[strlen(sentence) + 1];
+    strcpy(sentenceCopy, sentence);
+
+    char *token = strtok(sentenceCopy, ",");
+    if (token == NULL) return;  // Ensure at least one token is present
+
+    token = strtok(NULL, ",");
+    if (token != NULL) strcpy(gnrmcData->time_str, token);
+
+    token = strtok(NULL, ",");
+    if (token != NULL) gnrmcData->status = token[0];
+
+    token = strtok(NULL, ",");
+    if (token != NULL) gnrmcData->latitude = atof(token);
+
+    token = strtok(NULL, ",");
+    if (token != NULL) gnrmcData->lat_direction = token[0];
+
+    token = strtok(NULL, ",");
+    if (token != NULL) gnrmcData->longitude = atof(token);
+
+    token = strtok(NULL, ",");
+    if (token != NULL) gnrmcData->lon_direction = token[0];
+
+    token = strtok(NULL, ",");
+    if (token != NULL) gnrmcData->speed = atof(token);
+
+  //  token = strtok(NULL, ",");
+    // Skip the magnetic variation field
+
+    token = strtok(NULL, ",");
+    if (token != NULL) gnrmcData->date = atoi(token);  // Convert date to integer
+
+    // Skip the next two fields
+   token = strtok(NULL, ",");
+//    token = strtok(NULL, ",");
+
+ //   token = strtok(NULL, ",");
+    if (token != NULL) gnrmcData->mode = strdup(token);
+
+   token = strtok(NULL, ",");
+    if (token != NULL) gnrmcData->checksum = strdup(token);
+}
+
+void printGNRMCData(const GNRMCData *gnrmcData) {
+    char uart3TxBuffer[256];
+
+    sprintf(uart3TxBuffer, "UTC Time: %s\n\r", gnrmcData->time_str);
+    HAL_UART_Transmit(&huart3, (uint8_t *)uart3TxBuffer, strlen(uart3TxBuffer), HAL_MAX_DELAY);
+
+    sprintf(uart3TxBuffer, "Status: %c (Valid fix)\n\r", gnrmcData->status);
+    HAL_UART_Transmit(&huart3, (uint8_t *)uart3TxBuffer, strlen(uart3TxBuffer), HAL_MAX_DELAY);
+
+    sprintf(uart3TxBuffer, "Latitude: %lf %c\n\r", gnrmcData->latitude, gnrmcData->lat_direction);
+    HAL_UART_Transmit(&huart3, (uint8_t *)uart3TxBuffer, strlen(uart3TxBuffer), HAL_MAX_DELAY);
+
+    sprintf(uart3TxBuffer, "Longitude: %lf %c\n\r", gnrmcData->longitude, gnrmcData->lon_direction);
+    HAL_UART_Transmit(&huart3, (uint8_t *)uart3TxBuffer, strlen(uart3TxBuffer), HAL_MAX_DELAY);
+
+    sprintf(uart3TxBuffer, "Speed Over Ground: %lf knots\n\r", gnrmcData->speed);
+    HAL_UART_Transmit(&huart3, (uint8_t *)uart3TxBuffer, strlen(uart3TxBuffer), HAL_MAX_DELAY);
+
+/*    sprintf(uart3TxBuffer, "Course Over Ground: %lf\n\r", gnrmcData->course);
+    HAL_UART_Transmit(&huart3, (uint8_t *)uart3TxBuffer, strlen(uart3TxBuffer), HAL_MAX_DELAY);*/
+
+    sprintf(uart3TxBuffer, "Date: %d\n\r", gnrmcData->date);  // Print as integer
+    HAL_UART_Transmit(&huart3, (uint8_t *)uart3TxBuffer, strlen(uart3TxBuffer), HAL_MAX_DELAY);
+
+    sprintf(uart3TxBuffer, "Mode: %s (Autonomous fix)\n\r", gnrmcData->mode);  // Print as string
+    HAL_UART_Transmit(&huart3, (uint8_t *)uart3TxBuffer, strlen(uart3TxBuffer), HAL_MAX_DELAY);
+
+    sprintf(uart3TxBuffer, "Checksum: %s\n\r", gnrmcData->checksum);
+    HAL_UART_Transmit(&huart3, (uint8_t *)uart3TxBuffer, strlen(uart3TxBuffer), HAL_MAX_DELAY);
+}
+
 
 /* USER CODE END 4 */
 
